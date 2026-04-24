@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <!-- Dark background -->
+  <rect width="32" height="32" rx="8" fill="#0a0a0a"/>
+  <!-- Electric lime zap icon -->
+  <path d="M19 4L10 18h7l-4 10 13-16h-8l2-8z"
+        fill="#CCFF00"
+        stroke="#CCFF00"
+        stroke-width="0.5"
+        stroke-linejoin="round"/>
+</svg>

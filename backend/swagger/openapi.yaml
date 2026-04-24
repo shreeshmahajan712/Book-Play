@@ -1,0 +1,520 @@
+openapi: 3.0.3
+info:
+  title: TurfReserve API
+  description: |
+    Production-ready REST API for the TurfReserve sports turf booking marketplace.
+    
+    ## Authentication
+    All protected endpoints require a valid JWT delivered via **HTTP-only cookie** (`token`).
+    Log in via `POST /api/auth/login` to receive the cookie automatically.
+    
+    ## Commission Model
+    Every booking: `commissionAmount = basePrice × 10%` | `ownerPayout = basePrice − commissionAmount`
+    
+    ## Booking Flow
+    1. `GET /api/turfs/:slug/slots?date=YYYY-MM-DD` → pick an available slot
+    2. `POST /api/bookings` → creates Pending booking + Razorpay order
+    3. Complete payment on frontend using Razorpay checkout
+    4. Razorpay fires webhook → `POST /api/bookings/webhook/razorpay` → booking marked Paid
+    5. If payment abandoned → cron job auto-cancels after 10 min
+  version: 2.0.0
+  contact:
+    name: TurfReserve Engineering
+    email: api@turfreserve.in
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:5000
+    description: Local Development
+  - url: https://api.turfreserve.in
+    description: Production
+
+tags:
+  - name: Auth
+    description: Registration, login, logout, profile
+  - name: Turfs
+    description: Turf listing, discovery, slot availability
+  - name: Bookings
+    description: Atomic booking creation, payment, management
+
+# ─── Security ──────────────────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: token
+
+  schemas:
+    User:
+      type: object
+      properties:
+        _id: { type: string, example: "64a1f2b3c4d5e6f7a8b9c0d1" }
+        name: { type: string, example: "Rahul Sharma" }
+        email: { type: string, format: email, example: "rahul@example.com" }
+        role: { type: string, enum: [Player, Owner, Admin] }
+        phone: { type: string, example: "9876543210" }
+        avatar: { type: string, nullable: true }
+        isVerified: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+    Turf:
+      type: object
+      properties:
+        _id: { type: string }
+        name: { type: string, example: "Green FC Arena" }
+        slug: { type: string, example: "green-fc-arena-a3x7k" }
+        description: { type: string }
+        location:
+          type: object
+          properties:
+            type: { type: string, enum: [Point] }
+            coordinates: { type: array, items: { type: number }, example: [72.8777, 19.0760] }
+        city: { type: string, example: "mumbai" }
+        address: { type: string }
+        images: { type: array, items: { type: string } }
+        pricePerHour: { type: number, example: 800 }
+        weekendPricePerHour: { type: number, nullable: true }
+        openingTime: { type: string, example: "06:00" }
+        closingTime: { type: string, example: "23:00" }
+        slotDurationMinutes: { type: integer, enum: [30, 60] }
+        sport: { type: string, enum: [Football, Cricket, Basketball, Badminton, Tennis, Multi-Sport] }
+        amenities: { type: array, items: { type: string } }
+        averageRating: { type: number }
+        isActive: { type: boolean }
+
+    Slot:
+      type: object
+      properties:
+        startTime: { type: string, example: "10:00" }
+        endTime: { type: string, example: "11:00" }
+        price: { type: number, example: 800 }
+        status: { type: string, enum: [Available, Pending, Paid] }
+        isAvailable: { type: boolean }
+
+    Booking:
+      type: object
+      properties:
+        _id: { type: string }
+        turfId: { type: string }
+        playerId: { type: string }
+        date: { type: string, format: date }
+        startTime: { type: string, example: "10:00" }
+        endTime: { type: string, example: "11:00" }
+        basePrice: { type: number, example: 800 }
+        commissionAmount: { type: number, example: 80 }
+        ownerPayout: { type: number, example: 720 }
+        totalPrice: { type: number, example: 800 }
+        status: { type: string, enum: [Pending, Paid, Completed, Cancelled] }
+        transactionId: { type: string, nullable: true }
+        razorpayOrderId: { type: string, nullable: true }
+        expiresAt: { type: string, format: date-time, nullable: true }
+
+    Error:
+      type: object
+      properties:
+        success: { type: boolean, example: false }
+        message: { type: string }
+        status: { type: string, example: "fail" }
+
+# ─── Paths ─────────────────────────────────────────────────────────────────────
+paths:
+
+  # ── AUTH ────────────────────────────────────────────────────────────────────
+
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password]
+              properties:
+                name: { type: string, example: "Arjun Verma" }
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8, example: "Secure@123" }
+                role: { type: string, enum: [Player, Owner], default: Player }
+                phone: { type: string, example: "9876543210" }
+      responses:
+        201:
+          description: User registered. JWT cookie set.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      user: { $ref: '#/components/schemas/User' }
+        409: { description: Email already exists }
+        422: { description: Validation error }
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in and receive JWT cookie
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        200:
+          description: Login successful. JWT HTTP-only cookie set.
+        401: { description: Invalid credentials }
+
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out (clears cookie)
+      responses:
+        200: { description: Logged out }
+
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: Get current authenticated user
+      security: [{ cookieAuth: [] }]
+      responses:
+        200:
+          description: Current user profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      user: { $ref: '#/components/schemas/User' }
+        401: { description: Not authenticated }
+
+  # ── TURFS ────────────────────────────────────────────────────────────────────
+
+  /api/turfs:
+    get:
+      tags: [Turfs]
+      summary: List turfs with filters and pagination
+      parameters:
+        - in: query
+          name: city
+          schema: { type: string }
+          example: mumbai
+        - in: query
+          name: sport
+          schema: { type: string, enum: [Football, Cricket, Basketball, Badminton, Tennis, Multi-Sport] }
+        - in: query
+          name: minPrice
+          schema: { type: number }
+        - in: query
+          name: maxPrice
+          schema: { type: number }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 12 }
+      responses:
+        200:
+          description: Paginated turf list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fromCache: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      turfs: { type: array, items: { $ref: '#/components/schemas/Turf' } }
+                      total: { type: integer }
+                      page: { type: integer }
+                      pages: { type: integer }
+    post:
+      tags: [Turfs]
+      summary: Create a new turf listing (Owner/Admin only)
+      security: [{ cookieAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, coordinates, city, address, pricePerHour, openingTime, closingTime, sport]
+              properties:
+                name: { type: string }
+                coordinates: { type: array, items: { type: number }, example: [72.8777, 19.0760] }
+                city: { type: string }
+                address: { type: string }
+                pricePerHour: { type: number }
+                weekendPricePerHour: { type: number, nullable: true }
+                openingTime: { type: string, example: "06:00" }
+                closingTime: { type: string, example: "23:00" }
+                slotDurationMinutes: { type: integer, enum: [30, 60] }
+                sport: { type: string, enum: [Football, Cricket, Basketball, Badminton, Tennis, Multi-Sport] }
+                amenities: { type: array, items: { type: string } }
+      responses:
+        201: { description: Turf created }
+        403: { description: Not an Owner }
+
+  /api/turfs/nearby:
+    get:
+      tags: [Turfs]
+      summary: Find turfs near a location
+      parameters:
+        - in: query
+          name: lng
+          required: true
+          schema: { type: number }
+        - in: query
+          name: lat
+          required: true
+          schema: { type: number }
+        - in: query
+          name: radiusKm
+          schema: { type: number, default: 10 }
+        - in: query
+          name: sport
+          schema: { type: string }
+      responses:
+        200: { description: Nearby turfs }
+
+  /api/turfs/my:
+    get:
+      tags: [Turfs]
+      summary: Get all turfs owned by the current Owner
+      security: [{ cookieAuth: [] }]
+      responses:
+        200: { description: Owner's turfs }
+        403: { description: Not an Owner }
+
+  /api/turfs/{slug}:
+    get:
+      tags: [Turfs]
+      summary: Get a single turf by slug
+      parameters:
+        - in: path
+          name: slug
+          required: true
+          schema: { type: string }
+      responses:
+        200:
+          description: Turf detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      turf: { $ref: '#/components/schemas/Turf' }
+        404: { description: Turf not found }
+    put:
+      tags: [Turfs]
+      summary: Update a turf (Owner of that turf / Admin)
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - in: path
+          name: slug
+          required: true
+          schema: { type: string }
+      responses:
+        200: { description: Updated turf }
+        403: { description: Not the owner }
+    delete:
+      tags: [Turfs]
+      summary: Soft-delete a turf (Owner / Admin)
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - in: path
+          name: slug
+          required: true
+          schema: { type: string }
+      responses:
+        200: { description: Turf deactivated }
+
+  /api/turfs/{slug}/slots:
+    get:
+      tags: [Turfs]
+      summary: Get available time slots for a turf on a date
+      parameters:
+        - in: path
+          name: slug
+          required: true
+          schema: { type: string }
+        - in: query
+          name: date
+          required: true
+          schema: { type: string, format: date, example: "2025-07-15" }
+      responses:
+        200:
+          description: Slot availability grid
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      slots:
+                        type: array
+                        items: { $ref: '#/components/schemas/Slot' }
+                      date: { type: string }
+                      slotDurationMinutes: { type: integer }
+
+  # ── BOOKINGS ─────────────────────────────────────────────────────────────────
+
+  /api/bookings:
+    post:
+      tags: [Bookings]
+      summary: Create an atomic booking + Razorpay order (Player only)
+      security: [{ cookieAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [turfId, date, startTime]
+              properties:
+                turfId: { type: string, example: "64a1f2b3c4d5e6f7a8b9c0d1" }
+                date: { type: string, format: date, example: "2025-07-15" }
+                startTime: { type: string, example: "10:00" }
+      responses:
+        201:
+          description: Booking created (Pending). Use Razorpay details to complete payment.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      booking: { $ref: '#/components/schemas/Booking' }
+                      razorpay:
+                        type: object
+                        properties:
+                          orderId: { type: string }
+                          amount: { type: integer, description: "Amount in paise" }
+                          currency: { type: string, example: "INR" }
+                          keyId: { type: string }
+        409: { description: Slot already booked }
+        403: { description: Not a Player }
+
+  /api/bookings/my:
+    get:
+      tags: [Bookings]
+      summary: Get current player's bookings
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string, enum: [Pending, Paid, Completed, Cancelled] }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+      responses:
+        200: { description: Player's bookings }
+
+  /api/bookings/{id}/cancel:
+    patch:
+      tags: [Bookings]
+      summary: Cancel a booking (Player who made it or Admin)
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        200: { description: Booking cancelled }
+        403: { description: Not authorised }
+
+  /api/bookings/turf/{turfId}:
+    get:
+      tags: [Bookings]
+      summary: Get bookings for a specific turf (Owner / Admin)
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - in: path
+          name: turfId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: date
+          schema: { type: string, format: date }
+        - in: query
+          name: status
+          schema: { type: string }
+      responses:
+        200: { description: Turf bookings }
+
+  /api/bookings/revenue:
+    get:
+      tags: [Bookings]
+      summary: Owner revenue dashboard (aggregated)
+      security: [{ cookieAuth: [] }]
+      responses:
+        200:
+          description: Revenue summary + monthly breakdown
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      summary:
+                        type: object
+                        properties:
+                          totalRevenue: { type: number }
+                          totalCommission: { type: number }
+                          totalOwnerPayout: { type: number }
+                          totalBookings: { type: integer }
+                      monthly:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            _id:
+                              type: object
+                              properties:
+                                year: { type: integer }
+                                month: { type: integer }
+                            revenue: { type: number }
+                            bookings: { type: integer }
+
+  /api/bookings/webhook/razorpay:
+    post:
+      tags: [Bookings]
+      summary: Razorpay payment webhook (internal — not for client use)
+      description: |
+        Validates HMAC-SHA256 signature then marks booking as Paid on `payment.captured` event.
+        Requires raw (unparsed) request body — express.raw() is applied in server.js.
+      responses:
+        200: { description: Webhook received }
+        401: { description: Invalid signature }
