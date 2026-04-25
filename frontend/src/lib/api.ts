@@ -6,7 +6,8 @@ import axios from 'axios'
  * - Base URL auto-resolves via Vite proxy in dev (/api → localhost:5000)
  */
 const api = axios.create({
-  baseURL: '/api',
+  // Use the exact Render backend URL so Vercel knows where to send requests
+  baseURL: 'https://book-play-anmo.onrender.com/api',
   withCredentials: true,
   headers: { 'Content-Type': 'application/json' },
   timeout: 15000,
