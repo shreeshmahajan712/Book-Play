@@ -11,7 +11,7 @@ const signTokenAndCookie = (userId, res) => {
   res.cookie('token', token, {
     httpOnly: true,                                         // Not accessible via document.cookie
     secure: process.env.NODE_ENV === 'production',         // HTTPS only in prod
-    sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
     maxAge: parseInt(process.env.COOKIE_MAX_AGE_MS) || 7 * 24 * 60 * 60 * 1000, // 7d
   });
 
@@ -84,7 +84,7 @@ exports.logout = (_req, res) => {
   res.cookie('token', 'logged_out', {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
     maxAge: 1000, // 1 second — effectively clears it
   });
 
